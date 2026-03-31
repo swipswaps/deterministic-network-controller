@@ -44,7 +44,14 @@ async function startServer() {
   });
 
   app.post("/api/recover", async (req, res) => {
+    const lockPath = path.join(process.cwd(), "fix-wifi.lock");
     try {
+      // Check if lock file exists and is locked
+      const { stdout: lockCheck } = await execAsync(`flock -n ${lockPath} -c "echo free" || echo busy`);
+      if (lockCheck.trim() === "busy") {
+        return res.status(409).json({ error: "Recovery already in progress" });
+      }
+
       const { stdout, stderr } = await execAsync("sudo /usr/local/bin/fix-wifi --force");
       res.json({ message: "Recovery triggered", stdout, stderr });
     } catch (error: any) {
