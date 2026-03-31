@@ -72,6 +72,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'logs' | 'benchmarks'>('dashboard');
   // error: Stores any global error messages to display to the user.
   const [error, setError] = useState<string | null>(null);
+  // recoveryStatus: Stores detailed status during a recovery operation.
+  const [recoveryStatus, setRecoveryStatus] = useState<string | null>(null);
 
   // ---------------------------------------------------------------------------
   // DATA FETCHING LOGIC
@@ -98,6 +100,7 @@ export default function App() {
       setMilestones(milestonesData.milestones || []);
       setCommands(commandsData.commands || []);
       setError(null); // Clear any previous errors on success.
+      setRecoveryStatus(null); // Clear recovery status on success.
     } catch (err) {
       console.error('Failed to fetch forensic data:', err);
       setError('Connection to forensic engine lost. Retrying...');
@@ -134,24 +137,38 @@ export default function App() {
     if (recovering) return; // Prevent double-triggering while a request is pending.
 
     setRecovering(true);
+    setError(null);
+    setRecoveryStatus('Initializing recovery sequence...');
+    
     try {
       const res = await fetch('/api/recover', { method: 'POST' });
-      const data = await res.json();
-
+      
       if (!res.ok) {
-        // Handle 409 Conflict (busy) or 500 Internal Server Error.
+        const data = await res.json();
         throw new Error(data.error || 'Recovery sequence failed to initialize.');
       }
 
+      const data = await res.json();
       console.log('Recovery sequence triggered:', data);
+      setRecoveryStatus('Hardware reset triggered. Reconnecting...');
+      
       // Immediately refresh data to show the "RECOVERY_START" milestone in the event stream.
       fetchData();
     } catch (err: any) {
       console.error('Recovery action failed:', err);
-      alert(`Recovery Failed: ${err.message}`);
+      
+      // If it's a network error, it's likely expected during a driver reload.
+      if (err.name === 'TypeError' || err.message.includes('fetch')) {
+        setError('Network reset in progress. Reconnecting to dashboard...');
+        setRecoveryStatus('Network offline (Expected during reset).');
+      } else {
+        setError(`Recovery Failed: ${err.message}`);
+        setRecoveryStatus(null);
+      }
     } finally {
-      // Reset the recovering state regardless of success or failure.
-      setRecovering(false);
+      // We don't reset 'recovering' immediately if we lost connection.
+      // The polling fetchData will eventually clear it or we'll timeout.
+      setTimeout(() => setRecovering(false), 2000);
     }
   };
 
@@ -185,8 +202,10 @@ export default function App() {
       
       {/* GLOBAL ERROR BANNER */}
       {error && (
-        <div className="bg-[#F27D26] text-white text-[10px] font-bold uppercase tracking-[0.2em] py-1 text-center animate-pulse sticky top-0 z-[60]">
-          {error}
+        <div className="bg-[#F27D26] text-white text-[10px] font-bold uppercase tracking-[0.2em] py-2 px-4 text-center animate-pulse sticky top-0 z-[60] flex items-center justify-center gap-4">
+          <Activity className="w-3 h-3" />
+          <span>{error}</span>
+          {recoveryStatus && <span className="opacity-60 border-l border-white/20 pl-4">{recoveryStatus}</span>}
         </div>
       )}
 
