@@ -1,0 +1,18 @@
+# =============================================================================
+# requirements.txt (v0700 — SYSTEM DEPENDENCIES)
+# =============================================================================
+#
+# OBJECTIVE:
+#   This file lists the system-level dependencies required for the Broadcom
+#   Network Controller to function correctly.
+#
+# =============================================================================
+
+sqlite3
+NetworkManager
+iproute
+ping
+getent
+timeout
+flock
+sudo

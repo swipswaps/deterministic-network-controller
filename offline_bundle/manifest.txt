@@ -1,0 +1,5 @@
+Broadcom BCM4331 Firmware Bundle
+Created: $(date)
+Contents:
+- b43-firmware-6.30.163.46.tar.bz2
+- broadcom-wl-6.30.223.271.patch
