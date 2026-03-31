@@ -231,7 +231,11 @@ log() {
 
 # sql_escape: Escapes single quotes for safe inclusion in SQL strings.
 sql_escape() {
-  printf "%s" "${1//\'/\'\'}"
+  # Replace ' with '' for SQLite
+  local escaped="${1//\'/\'\'}"
+  # Also remove any characters that might break the heredoc if necessary, 
+  # but here we just need SQL safety.
+  printf "%s" "$escaped"
 }
 
 # record_milestone: Logs a significant event to the database.
@@ -240,7 +244,9 @@ record_milestone() {
   local details="${2:-}"
   log "MILESTONE: $name | $details"
   
-  sqlite3 "$DB_FILE" "INSERT INTO milestones (name, details) VALUES ('$(sql_escape "$name")', '$(sql_escape "$details")');"
+  sqlite3 "$DB_FILE" <<EOF
+INSERT INTO milestones (name, details) VALUES ('$(sql_escape "$name")', '$(sql_escape "$details")');
+EOF
 }
 
 # record_command: Logs the result of a shell command to the database.
@@ -252,7 +258,9 @@ record_command() {
   # Ensure the exit code is a valid integer.
   [[ "$code" =~ ^[0-9]+$ ]] || code=999
 
-  sqlite3 "$DB_FILE" "INSERT INTO commands (command, exit_code, output) VALUES ('$(sql_escape "$cmd")', $code, '$(sql_escape "$output")');"
+  sqlite3 "$DB_FILE" <<EOF
+INSERT INTO commands (command, exit_code, output) VALUES ('$(sql_escape "$cmd")', $code, '$(sql_escape "$output")');
+EOF
 }
 
 # run_audit: Executes a command with a default 10s timeout.
@@ -293,31 +301,31 @@ forensic_handshake() {
   detect_interface
   
   # ICMP & DNS
-  run_audit "ICMP Check" ping -c 3 -W 2 8.8.8.8 || true
-  run_audit "DNS Forensic (System)" getent hosts google.com || true
-  run_audit "DNS Forensic (External)" dig @8.8.8.8 +short google.com || true
+  run_audit_timeout 15s "ICMP Check" ping -c 3 -W 2 8.8.8.8 || true
+  run_audit_timeout 15s "DNS Forensic (System)" getent hosts google.com || true
+  run_audit_timeout 15s "DNS Forensic (External)" dig @8.8.8.8 +short google.com || true
   
   # Path & Quality
-  run_audit "Path Forensic: traceroute" traceroute -q 1 -m 15 google.com || true
-  run_audit "Quality Forensic: mtr" mtr -c 5 -r -w google.com || true
-  run_audit "Path Forensic: ip route" ip route || true
-  run_audit "ARP Forensic" ip neighbor show || true
+  run_audit_timeout 30s "Path Forensic: traceroute" traceroute -q 1 -m 15 google.com || true
+  run_audit_timeout 45s "Quality Forensic: mtr" mtr -c 5 -r -w google.com || true
+  run_audit_timeout 15s "Path Forensic: ip route" ip route || true
+  run_audit_timeout 15s "ARP Forensic" ip neighbor show || true
   
   # System Health
-  run_audit "Entropy Audit" cat /proc/sys/kernel/random/entropy_avail || true
+  run_audit_timeout 10s "Entropy Audit" cat /proc/sys/kernel/random/entropy_avail || true
   local entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
   if [[ "$entropy" -lt 200 ]]; then
-    run_audit "Entropy Audit: Boosting" sudo systemctl start haveged || true
+    run_audit_timeout 20s "Entropy Audit: Boosting" sudo systemctl start haveged || true
   fi
-  run_audit "Time Forensic: sources" chronyc -n sources || true
-  run_audit "Time Forensic: sync" sudo chronyc makestep || true
+  run_audit_timeout 15s "Time Forensic: sources" chronyc -n sources || true
+  run_audit_timeout 15s "Time Forensic: sync" sudo chronyc makestep || true
   
   # Broadcom-specific forensics
-  run_audit "WPA Audit" journalctl -u wpa_supplicant --no-pager -n 50 || true
-  run_audit "Network Sniff (Brief)" sudo timeout 5s tcpdump -i "${INTERFACE}" -c 10 -n || true
-  run_audit "Broadcom Forensic (rfkill)" rfkill list || true
-  run_audit "Broadcom Forensic (dmesg)" dmesg | tail -50 | grep -Ei 'broadcom|bcm|wifi|wl|brcm' || true
-  run_audit "Broadcom Forensic (NM status)" nmcli device status || true
+  run_audit_timeout 20s "WPA Audit" journalctl -u wpa_supplicant --no-pager -n 50 || true
+  run_audit_timeout 20s "Network Sniff (Brief)" sudo timeout 5s tcpdump -i "${INTERFACE}" -c 10 -n || true
+  run_audit_timeout 15s "Broadcom Forensic (rfkill)" rfkill list || true
+  run_audit_timeout 20s "Broadcom Forensic (dmesg)" dmesg | tail -50 | grep -Ei 'broadcom|bcm|wifi|wl|brcm' || true
+  run_audit_timeout 15s "Broadcom Forensic (NM status)" nmcli device status || true
   
   record_milestone "FORENSIC_HANDSHAKE_COMPLETE"
 }
@@ -334,18 +342,33 @@ networking_enabled() {
 # Returns a score from 0 to 100.
 calculate_health() {
   local score=0
+  local reason=""
+  
   # Layer 1: ICMP Ping to a reliable public IP (Cloudflare DNS).
-  if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+  if ping -c 3 -W 2 1.1.1.1 >/dev/null 2>&1; then
     score=$((score + 40))
+  else
+    reason="${reason}Ping failed; "
   fi
+  
   # Layer 2: DNS Resolution check.
   if getent hosts google.com >/dev/null 2>&1; then
     score=$((score + 30))
+  else
+    reason="${reason}DNS failed; "
   fi
+  
   # Layer 3: Routing Table check (presence of a default gateway).
   if ip route | grep -q "^default"; then
     score=$((score + 30))
+  else
+    reason="${reason}No default route; "
   fi
+  
+  if [[ $score -lt 100 ]]; then
+    log "HEALTH_DEGRADED: Score $score/100 | Reasons: ${reason:-None}"
+  fi
+  
   echo "$score"
 }
 
@@ -526,9 +549,24 @@ recover() {
   fi
   # Reload the open-source driver (standard for Fedora BCM4331)
   run_audit "System Setup (reload)" modprobe brcmfmac || true
+  
+  # Wait for the interface to appear after driver reload
+  log "Waiting for interface ${INTERFACE} to appear..."
+  local wait_count=0
+  while ! ip link show "${INTERFACE}" >/dev/null 2>&1 && [[ $wait_count -lt 10 ]]; do
+    sleep 1
+    wait_count=$((wait_count + 1))
+  done
+
   # Disable power management which often causes drops on Broadcom
   run_audit "System Setup (power_save off)" iw dev "${INTERFACE}" set power_save off || true
+  
+  # Force NetworkManager to manage the device
+  log "Forcing NetworkManager to manage ${INTERFACE}..."
   run_audit "System Setup (NM managed)" nmcli device set "${INTERFACE}" managed yes || true
+  
+  # Ensure the interface is actually up at the kernel level
+  run_audit "System Setup (link up)" ip link set "${INTERFACE}" up || true
 
   # Step 3: Ensure networking is globally enabled in NetworkManager.
   if ! networking_enabled; then
@@ -589,10 +627,10 @@ recover() {
       record_milestone "CONNECTION_ACTIVATION_SUCCESS" "UUID $uuid"
     else
       record_milestone "CONNECTION_ACTIVATION_FAILURE" "All $retries attempts failed for UUID $uuid"
-      # If activation failed, try a soft reset of the interface.
-      run_audit "interface reset (disconnect)" nmcli device disconnect uuid "$uuid" 2>/dev/null || true
+      # If activation failed, try a soft reset of the connection.
+      run_audit "connection reset (down)" nmcli connection down uuid "$uuid" 2>/dev/null || true
       sleep 2
-      run_audit "interface reset (connect)" nmcli device connect uuid "$uuid" 2>/dev/null || true
+      run_audit "connection reset (up)" nmcli connection up uuid "$uuid" 2>/dev/null || true
     fi
   else
     record_milestone "CRITICAL_FAILURE_NO_UUID"
@@ -625,6 +663,7 @@ main() {
     control=$(PID_CONTROL)
     
     log "PID CONTROL SIGNAL: $control"
+    record_milestone "HEARTBEAT" "Control Signal: $control | Health: $(calculate_health)/100"
 
     # Decision Logic based on the control signal:
     if (( control < HYSTERESIS_LOW )); then
@@ -652,6 +691,16 @@ main() {
 # -----------------------------------------------------------------------------
 # Support for manual "force" recovery via CLI argument.
 if [[ "${1:-}" == "--force" ]]; then
+  # If forcing, we try to kill any existing monitoring loop to avoid lock contention.
+  # We use a pattern that matches the script name but not this specific process.
+  log "FORCE_RECOVERY: Purging existing controller instances..."
+  pkill -9 -f "fix-wifi.sh" || true
+  sleep 1
+  
+  # Re-acquire lock (should be free now)
+  exec 9>"$LOCK_FILE"
+  flock -x 9
+  
   init_db
   install_dependencies
   detect_interface

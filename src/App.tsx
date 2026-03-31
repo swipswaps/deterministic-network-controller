@@ -74,6 +74,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   // recoveryStatus: Stores detailed status during a recovery operation.
   const [recoveryStatus, setRecoveryStatus] = useState<string | null>(null);
+  // lastUpdated: Tracks the last time data was successfully fetched.
+  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
   // ---------------------------------------------------------------------------
   // DATA FETCHING LOGIC
@@ -101,6 +103,7 @@ export default function App() {
       setCommands(commandsData.commands || []);
       setError(null); // Clear any previous errors on success.
       setRecoveryStatus(null); // Clear recovery status on success.
+      setLastUpdated(new Date());
     } catch (err) {
       console.error('Failed to fetch forensic data:', err);
       setError('Connection to forensic engine lost. Retrying...');
@@ -242,18 +245,29 @@ export default function App() {
           </nav>
 
           {/* ACTION BUTTON */}
-          <button 
-            onClick={handleRecover}
-            disabled={recovering}
-            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all active:scale-95 ${
-              recovering 
-                ? 'bg-[#141414] text-[#444] cursor-not-allowed' 
-                : 'bg-white text-black hover:bg-[#F27D26] hover:text-white shadow-[0_0_20px_rgba(255,255,255,0.05)]'
-            }`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${recovering ? 'animate-spin' : ''}`} />
-            {recovering ? 'Executing...' : 'Force Recovery'}
-          </button>
+          <div className="flex items-center gap-4">
+            <div className="hidden lg:flex flex-col items-end">
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 bg-[#00FF00] rounded-full animate-pulse shadow-[0_0_8px_#00FF00]" />
+                <span className="text-[9px] font-black uppercase tracking-[0.2em] text-[#00FF00]">Live</span>
+              </div>
+              <p className="text-[8px] font-mono text-[#444] uppercase tracking-widest mt-0.5">
+                Last Sync: {lastUpdated.toLocaleTimeString()}
+              </p>
+            </div>
+            <button 
+              onClick={handleRecover}
+              disabled={recovering}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all active:scale-95 ${
+                recovering 
+                  ? 'bg-[#141414] text-[#444] cursor-not-allowed' 
+                  : 'bg-white text-black hover:bg-[#F27D26] hover:text-white shadow-[0_0_20px_rgba(255,255,255,0.05)]'
+              }`}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${recovering ? 'animate-spin' : ''}`} />
+              {recovering ? 'Executing...' : 'Force Recovery'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -450,7 +464,17 @@ export default function App() {
                   <tbody className="text-[10px] font-mono">
                     {commands.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="p-12 text-center opacity-20 italic">No command history available.</td>
+                        <td colSpan={4} className="p-12 text-center opacity-40 italic">
+                          <div className="flex flex-col items-center gap-3">
+                            <Database className="w-8 h-8 text-[#141414]" />
+                            <div>
+                              <p className="text-xs font-black uppercase tracking-widest text-[#444]">No command history available.</p>
+                              <p className="text-[9px] text-[#222] mt-1 uppercase tracking-widest">
+                                Waiting for controller telemetry... (Last Checked: {lastUpdated.toLocaleTimeString()})
+                              </p>
+                            </div>
+                          </div>
+                        </td>
                       </tr>
                     )}
                     {commands.map((c, i) => (

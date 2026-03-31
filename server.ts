@@ -133,24 +133,14 @@ async function startServer() {
    *    to run the specific script without a password prompt.
    */
   app.post("/api/recover", async (req, res) => {
-    const lockPath = path.join(process.cwd(), "fix-wifi.lock");
     try {
-      // Step 1: Check if the controller is already running using flock.
-      // We attempt to acquire a non-blocking lock (-n). 
-      // If the lock is held by another process, flock returns a non-zero exit code.
-      const { stdout: lockCheck } = await execAsync(`flock -n ${lockPath} -c "echo free" || echo busy`);
-      
-      if (lockCheck.trim() === "busy") {
-        console.warn("Recovery Request Denied: Controller is already active.");
-        return res.status(409).json({ 
-          error: "Recovery already in progress",
-          details: "The system controller is currently executing a recovery sequence. Please wait for it to complete."
-        });
-      }
-
-      // Step 2: Trigger the recovery script with the --force flag.
+      // Step 1: Trigger the recovery script with the --force flag.
       // We prioritize the local script in the current directory to ensure
       // that the latest development changes are used.
+      //
+      // NOTE: We no longer perform a pre-flight 'flock' check here because 
+      // fix-wifi.sh --force now includes logic to purge existing instances 
+      // and re-acquire the lock, allowing manual overrides to succeed.
       console.log("Triggering manual recovery sequence...");
       const localScript = path.join(process.cwd(), "fix-wifi.sh");
       const command = `sudo ${localScript} --force`;
