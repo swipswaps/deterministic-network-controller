@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Broadcom Control Center
+Comment=Deterministic Network Controller and Recovery Kit
+Exec=xdg-open http://localhost:3000
+Icon=network-wireless
+Terminal=false
+Categories=System;Network;
+Keywords=wifi;broadcom;recovery;network;

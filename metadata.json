@@ -1,0 +1,5 @@
+{
+  "name": "Broadcom Network Controller & Recovery Kit",
+  "description": "A deterministic, policy-aware network controller for Fedora, designed to stabilize and recover Broadcom BCM4331 Wi-Fi environments with autonomous self-healing and forensic observability.",
+  "requestFramePermissions": []
+}
