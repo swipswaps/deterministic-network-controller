@@ -1,186 +1,123 @@
-# 🛰️ Broadcom Recovery Kit v38.2
+# Broadcom Network Controller & Recovery Kit (v0700)
 
-A deterministic, multi-layer recovery system for Broadcom Wi-Fi chipsets on Linux (Fedora/X11/GNOME).
+An autonomous, deterministic, and forensic-aware network recovery engine designed specifically for Broadcom Wi-Fi chipsets on Linux (Fedora/RHEL/CentOS).
 
-This project is designed around a **single recovery engine** with optional layers for automation, UI, and system integration.
+## 🚀 Overview
 
----
+Broadcom wireless adapters on Linux are notorious for "soft-locking" or dropping connections under specific power-management states or kernel transitions. This kit provides a robust, three-tier solution to ensure 99.9% network uptime through autonomous self-healing.
 
-## 🧠 System Architecture
-
-### LEVEL 1 — CORE ENGINE
-- `fix-wifi.sh`
-
-### LEVEL 2 — AUTOMATION (OPTIONAL)
-- systemd timer (autonomous recovery)
-
-### LEVEL 3 — INTERFACES (OPTIONAL)
-- Web dashboard (Node.js)
-- Tray applet (Python)
-
-### LEVEL 4 — SYSTEM INTEGRATION (OPTIONAL)
-- NOPASSWD sudo
-- system-wide binary installation
-- desktop entry
-
-> You do not need to install all layers.  
-> Choose the level that matches your use case.
+### The Three Tiers:
+1.  **The Engine (`fix-wifi.sh`)**: A Bash-based PID (Proportional-Integral-Derivative) controller that monitors network health and executes recovery sequences.
+2.  **The Bridge (`server.ts`)**: An Express.js backend that provides a secure API to the engine and the forensic database.
+3.  **The Dashboard (`App.tsx`)**: A modern React interface for real-time telemetry, command auditing, and manual overrides.
 
 ---
 
-## 🚀 Quick Start (Minimal Mode)
+## 🛠 Architecture & Design
 
-Run the recovery engine directly:
+### PID Control Loop
+Inspired by Betaflight flight controllers, the engine uses a PID loop to calculate a "Control Signal" based on network health.
+-   **Proportional (Kp)**: Immediate response to health drops.
+-   **Integral (Ki)**: Corrects long-term drift and persistent outages (with Anti-Windup protection).
+-   **Derivative (Kd)**: Dampens rapid fluctuations to prevent jitter.
 
-```bash
-chmod +x fix-wifi.sh
-./fix-wifi.sh
-```
-
-This is the core functionality of the entire system.
-
----
-
-## ⚙️ Installation Modes
-
-### 🟢 Mode A — Minimal (CLI Only)
-
-```bash
-git clone <your-repo-url>
-cd broadcom-recovery-kit
-chmod +x fix-wifi.sh
-./fix-wifi.sh
-```
-
-### 🔵 Mode B — System-Wide + Automation
-
-```bash
-sudo cp fix-wifi.sh /usr/local/bin/fix-wifi
-sudo chmod +x /usr/local/bin/fix-wifi
-```
-
-#### 🤖 Autonomous Recovery (Optional)
-
-Enable background self-healing using systemd.
-
-**Create service:**
-```bash
-sudo tee /etc/systemd/system/fix-wifi.service << 'EOF'
-[Unit]
-Description=Wi-Fi Recovery Engine
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fix-wifi --force
-EOF
-```
-
-**Create timer:**
-```bash
-sudo tee /etc/systemd/system/fix-wifi.timer << 'EOF'
-[Unit]
-Description=Periodic Wi-Fi Recovery
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
-EOF
-```
-
-**Enable:**
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now fix-wifi.timer
-```
-
-This mode turns the system into a self-healing network node.
+### Forensic Observability
+Every action is recorded in an SQLite database (`recovery_state.db`):
+-   **Milestones**: High-level system events.
+-   **Commands**: Verbatim shell commands, exit codes, and `stderr/stdout` buffers.
+-   **Stats**: Success/failure tracking per connection UUID.
 
 ---
 
-## 🖥️ Control Interfaces (Optional)
+## 📦 Installation & Setup
 
-### Web Dashboard (Node.js)
+### Prerequisites
+-   **Linux Distribution**: Fedora (tested), RHEL, or CentOS.
+-   **Hardware**: Broadcom BCM43xx series (e.g., MacBook Pro, Dell XPS).
+-   **Dependencies**: `sqlite3`, `nmcli`, `ping`, `getent`, `ip`, `timeout`, `flock`.
 
-```bash
-npm install
-npm run dev
-```
-
-Access at: [http://localhost:3000](http://localhost:3000)
-
-### Tray Applet (X11)
-
-```bash
-pip install pystray pillow requests
-python3 tray_applet.py &
-```
-
----
-
-## 🔐 Optional: Silent Execution Mode
-
-Only enable if you understand the security implications.
-
-```bash
-sudo visudo
-```
-
-**Add:**
-```text
-owner ALL=(ALL) NOPASSWD: /usr/local/bin/fix-wifi
-```
-
-Enables UI-triggered recovery without password prompts.
+### Quick Start
+1.  **Clone the repository** to your local machine.
+2.  **Install dependencies**:
+    ```bash
+    npm install
+    ```
+3.  **Configure Sudo**:
+    The server needs to run the recovery script with elevated privileges. Add the following to your `/etc/sudoers` (replace `<user>` and `<path>`):
+    ```text
+    <user> ALL=(ALL) NOPASSWD: /usr/local/bin/fix-wifi
+    ```
+4.  **Start the Controller**:
+    ```bash
+    # Start the background engine
+    ./fix-wifi.sh &
+    
+    # Start the dashboard
+    npm run dev
+    ```
 
 ---
 
-## 📦 Offline Recovery Bundle
+## ⚙️ Configuration
 
-Generate firmware + driver bundle for air-gapped systems:
+### Environment Variables
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PROJECT_ROOT` | `pwd` | Base directory for logs and DB. |
+| `AUTO_REENABLE_NETWORKING` | `1` | Automatically toggle NM networking on. |
+| `Kp`, `Ki`, `Kd` | `800, 50, 300` | PID gains (scaled by 1000). |
 
-```bash
-./prepare-bundle.sh
-```
-
----
-
-## 📁 Project Structure
-
-- `fix-wifi.sh` → Core recovery engine (deterministic logic)
-- `prepare-bundle.sh` → Offline firmware bundling
-- `server.ts` → Backend bridge (UI → system)
-- `src/App.tsx` → Web UI
-- `tray_applet.py` → System tray bridge
+### PID Tuning Guide
+-   **Increase `Kp`** if the system is too slow to react to a total disconnect.
+-   **Increase `Ki`** if the system stays in a "Degrading" state without recovering.
+-   **Increase `Kd`** if the system toggles `nmcli` off/on too frequently during minor jitter.
 
 ---
 
-## ⚠️ Important Notes
+## 🔍 Troubleshooting (Broadcom Specific)
 
-- This system operates at kernel + hardware level.
-- Avoid mixing manual nmcli overrides with automated control modes.
-- Do not manually kill network services when using this system.
-- Choose one control layer per environment (manual, systemd, or UI).
+### 1. "Firmware Missing" Errors
+If `dmesg | grep brcm` shows firmware load failures:
+-   **Fix**: Install `broadcom-bt-firmware` and `b43-firmware`.
+-   **Fedora**: `sudo dnf install b43-fwcutter broadcom-wl`.
+
+### 2. `nmcli` Connection Activation Failed
+If the dashboard shows `FAILURE_1` on connection activation:
+-   **Reason**: Usually a WPA supplicant timeout or incorrect regulatory domain.
+-   **Fix**: Set your regulatory domain: `sudo iw reg set US` (or your country code).
+
+### 3. Script Fails to Start (Lock Error)
+If you see `Another instance is already running`:
+-   **Fix**: Check for stale lock files: `rm fix-wifi.lock`. Ensure no other `fix-wifi.sh` processes are active.
+
+### 4. Dashboard Shows "Connection Lost"
+-   **Fix**: Ensure the Express server is running (`npm run dev`) and that the `recovery_state.db` file is readable by the Node.js process.
 
 ---
 
-## 🧩 Design Principles
+## 📊 Database Schema
 
-- **Deterministic execution** (no hidden state)
-- **No hardcoded interface assumptions**
-- **NetworkManager remains in control**
-- **Modular layers**, optional activation
-- **Failover via orchestration**, not destruction
+### `milestones`
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `timestamp` | DATETIME | ISO-8601 event time. |
+| `name` | TEXT | Event identifier (e.g., `RECOVERY_START`). |
+| `details` | TEXT | Contextual information. |
+
+### `commands`
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `timestamp` | DATETIME | Execution time. |
+| `command` | TEXT | The verbatim shell command. |
+| `exit_code` | INTEGER | `0` for success, `>0` for failure. |
+| `output` | TEXT | Combined `stdout` and `stderr`. |
 
 ---
 
-## 🏁 Summary
+## 🛡 Security
+-   **Single Instance**: Uses `flock` to prevent race conditions on hardware state.
+-   **SQL Safety**: All database interactions use parameterized queries to prevent SQL injection.
+-   **Minimal Surface**: The Express server only exposes read-only endpoints for the database, with the exception of the `/api/recover` trigger.
 
-| Mode | Purpose |
-| :--- | :--- |
-| **Minimal** | Run `fix-wifi.sh` manually |
-| **System** | Install globally |
-| **Automated** | systemd self-healing |
-| **Full Stack** | UI + tray + automation |
+---
+*Created by Jose J Melendez | v0700*
