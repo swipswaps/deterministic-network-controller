@@ -205,11 +205,7 @@ record_milestone() {
   local details="${2:-}"
   log "MILESTONE: $name | $details"
   
-  sqlite3 "$DB_FILE" <<EOF
-.parameter set :name '$(sql_escape "$name")'
-.parameter set :details '$(sql_escape "$details")'
-INSERT INTO milestones (name, details) VALUES (:name, :details);
-EOF
+  sqlite3 "$DB_FILE" "INSERT INTO milestones (name, details) VALUES ('$(sql_escape "$name")', '$(sql_escape "$details")');"
 }
 
 # record_command: Logs the result of a shell command to the database.
@@ -221,12 +217,7 @@ record_command() {
   # Ensure the exit code is a valid integer.
   [[ "$code" =~ ^[0-9]+$ ]] || code=999
 
-  sqlite3 "$DB_FILE" <<EOF
-.parameter set :cmd '$(sql_escape "$cmd")'
-.parameter set :code $code
-.parameter set :out '$(sql_escape "$output")'
-INSERT INTO commands (command, exit_code, output) VALUES (:cmd, :code, :out);
-EOF
+  sqlite3 "$DB_FILE" "INSERT INTO commands (command, exit_code, output) VALUES ('$(sql_escape "$cmd")', $code, '$(sql_escape "$output")');"
 }
 
 # run_audit: Executes a command with a default 10s timeout.
@@ -451,7 +442,16 @@ select_best_connection() {
 # -----------------------------------------------------------------------------
 # recover: The main recovery sequence triggered when health is critically low.
 recover() {
-  record_milestone "RECOVERY_SEQUENCE_START"
+  local current_health
+  current_health=$(calculate_health)
+  
+  if [[ "$current_health" -eq 100 ]]; then
+    log "RECOVERY_SKIPPED: System health is already 100/100. No action required."
+    record_milestone "RECOVERY_SKIPPED" "Health is 100/100"
+    return 0
+  fi
+
+  record_milestone "RECOVERY_SEQUENCE_START" "Current Health: $current_health/100"
   detect_interface
 
   # Nuclear Step 1: Nuclear Clear (kill conflicting processes and reset NM)
@@ -463,8 +463,17 @@ recover() {
   
   # Nuclear Step 2: System Setup (driver/firmware reload)
   record_milestone "SYSTEM_SETUP_START"
-  # Try to unload both common Broadcom modules
-  run_audit "System Setup (unload)" modprobe -r brcmfmac wl || true
+  # Try to unload both common Broadcom modules if they are loaded
+  local modules_to_unload=()
+  for mod in brcmfmac wl; do
+    if lsmod | grep -q "^$mod"; then
+      modules_to_unload+=("$mod")
+    fi
+  done
+  
+  if [[ ${#modules_to_unload[@]} -gt 0 ]]; then
+    run_audit "System Setup (unload)" modprobe -r "${modules_to_unload[@]}" || true
+  fi
   # Reload the open-source driver (standard for Fedora BCM4331)
   run_audit "System Setup (reload)" modprobe brcmfmac || true
   # Disable power management which often causes drops on Broadcom
