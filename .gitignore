@@ -4,5 +4,9 @@ dist/
 coverage/
 .DS_Store
 *.log
+*.db
+*.lock
+recovery_state.db
+manifest.db
 .env*
 !.env.example

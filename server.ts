@@ -149,9 +149,12 @@ async function startServer() {
       }
 
       // Step 2: Trigger the recovery script with the --force flag.
-      // The --force flag bypasses the PID loop and executes the recovery sequence immediately.
+      // We prioritize the local script in the current directory to ensure
+      // that the latest development changes are used.
       console.log("Triggering manual recovery sequence...");
-      const { stdout, stderr } = await execAsync("sudo /usr/local/bin/fix-wifi --force");
+      const localScript = path.join(process.cwd(), "fix-wifi.sh");
+      const command = `sudo ${localScript} --force`;
+      const { stdout, stderr } = await execAsync(command);
       
       res.json({ 
         message: "Recovery triggered successfully", 

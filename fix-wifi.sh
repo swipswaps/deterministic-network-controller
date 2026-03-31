@@ -63,6 +63,12 @@ LOCK_FILE="${PROJECT_ROOT}/fix-wifi.lock"
 # AUTO_REENABLE_NETWORKING: If 1, the script will try to turn on networking if disabled.
 AUTO_REENABLE_NETWORKING="${AUTO_REENABLE_NETWORKING:-1}"
 
+# Dynamic Wi-Fi interface detection (works for wlan0, wlp*, wl*)
+detect_interface() {
+  INTERFACE=$(ls /sys/class/net 2>/dev/null | grep -E '^(wl|wlan)' | head -n1 || echo "wlan0")
+  log "INTERFACE_DETECTED: ${INTERFACE}"
+}
+
 # -----------------------------------------------------------------------------
 # SINGLE INSTANCE LOCKING
 # -----------------------------------------------------------------------------
@@ -127,6 +133,28 @@ HYSTERESIS_LOW=40
 #   The absolute maximum and minimum values the control signal can reach.
 MAX_OUTPUT=1000
 MIN_OUTPUT=-1000
+
+# install_dependencies: Checks for and attempts to install missing system tools.
+install_dependencies() {
+  local deps=("sqlite3" "nmcli" "ping" "getent" "ip" "timeout" "haveged" "chrony" "iw" "rfkill" "tcpdump" "mtr" "bind-utils")
+  local missing=()
+  
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null && ! rpm -q "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "Missing dependencies: ${missing[*]}"
+    if [[ "$EUID" -eq 0 ]] || command -v sudo &>/dev/null; then
+      log "Attempting to install missing dependencies via dnf..."
+      sudo dnf install -y "${missing[@]}" || log "WARNING: Failed to install some dependencies."
+    else
+      log "ERROR: Missing dependencies and cannot run sudo dnf. Script may fail."
+    fi
+  fi
+}
 
 # -----------------------------------------------------------------------------
 # DATABASE INITIALIZATION
@@ -201,22 +229,56 @@ INSERT INTO commands (command, exit_code, output) VALUES (:cmd, :code, :out);
 EOF
 }
 
-# run_audit: Executes a command with a timeout and logs its output/exit code.
+# run_audit: Executes a command with a default 10s timeout.
 run_audit() {
-  local label="$1"
-  shift
-  log "RUNNING COMMAND: $label ($*)"
+  run_audit_timeout 10s "$@"
+}
+
+# run_audit_timeout: Executes a command with a custom timeout and logs its output/exit code.
+run_audit_timeout() {
+  local timeout_val="$1"
+  local label="$2"
+  shift 2
+  log "RUNNING COMMAND: $label ($*) [Timeout: $timeout_val]"
   local output
   local exit_code=0
-  # We use a 10s timeout to prevent stalled commands from blocking the controller.
-  output=$(timeout 10s "$@" 2>&1) || exit_code=$?
   
+  # We use the provided timeout to prevent stalled commands from blocking the controller.
+  # We use 'eval' to support complex commands if needed, but carefully.
+  output=$(timeout "$timeout_val" "$@" 2>&1) || exit_code=$?
+  
+  # Print output to terminal verbatim if it's a failure or if verbose mode (implied by log)
   if [[ $exit_code -ne 0 ]]; then
     log "COMMAND FAILED: $label (Exit Code: $exit_code)"
+    echo "--- FAILURE OUTPUT ---"
+    echo "$output"
+    echo "----------------------"
   fi
   
   record_command "$label $*" "$exit_code" "$output"
   return "$exit_code"
+}
+
+# forensic_handshake: Performs a deep audit of the network state.
+forensic_handshake() {
+  record_milestone "FORENSIC_HANDSHAKE_START"
+  detect_interface
+  
+  # ICMP & DNS
+  run_audit "ICMP Check" ping -c 3 -W 2 8.8.8.8 || true
+  run_audit "DNS Forensic (System)" getent hosts google.com || true
+  run_audit "DNS Forensic (External)" dig @8.8.8.8 +short google.com || true
+  
+  # Path & Quality
+  run_audit "Path Forensic" ip route || true
+  run_audit "ARP Forensic" ip neighbor show || true
+  
+  # Broadcom-specific forensics
+  run_audit "Broadcom Forensic (rfkill)" rfkill list || true
+  run_audit "Broadcom Forensic (dmesg)" dmesg | tail -50 | grep -Ei 'broadcom|bcm|wifi|wl|brcm' || true
+  run_audit "Broadcom Forensic (NM status)" nmcli device status || true
+  
+  record_milestone "FORENSIC_HANDSHAKE_COMPLETE"
 }
 
 # -----------------------------------------------------------------------------
@@ -353,12 +415,28 @@ select_best_connection() {
 
   # Phase 2: Search for any configured Wireless connection.
   # If no active Ethernet was found, we look for a Wi-Fi connection to activate.
+  # We prefer connections that are already "active" but might be in a degraded state.
   for uuid in $uuids; do
     [[ -z "$uuid" ]] && continue
     local type
     type=$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null || echo "unknown")
     if [[ "$type" == "802-11-wireless" ]]; then
-      # We return the first Wi-Fi connection we find.
+      local state
+      state=$(nmcli -g GENERAL.STATE device show uuid "$uuid" 2>/dev/null || echo "unknown")
+      if [[ "$state" == "100 (connected)" ]]; then
+        # If it's already connected, we return it as the best candidate.
+        echo "$uuid"
+        return 0
+      fi
+    fi
+  done
+
+  # Fallback: Return the first Wi-Fi connection found.
+  for uuid in $uuids; do
+    [[ -z "$uuid" ]] && continue
+    local type
+    type=$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null || echo "unknown")
+    if [[ "$type" == "802-11-wireless" ]]; then
       echo "$uuid"
       return 0
     fi
@@ -374,8 +452,26 @@ select_best_connection() {
 # recover: The main recovery sequence triggered when health is critically low.
 recover() {
   record_milestone "RECOVERY_SEQUENCE_START"
+  detect_interface
 
-  # Step 1: Ensure networking is globally enabled in NetworkManager.
+  # Nuclear Step 1: Nuclear Clear (kill conflicting processes and reset NM)
+  record_milestone "NUCLEAR_CLEAR_START"
+  run_audit "Nuclear Clear (kill)" pkill -9 -f 'wpa_supplicant|dhclient|NetworkManager' || true
+  sleep 1
+  run_audit "Nuclear Clear (restart NM)" systemctl restart NetworkManager || true
+  sleep 2
+  
+  # Nuclear Step 2: System Setup (driver/firmware reload)
+  record_milestone "SYSTEM_SETUP_START"
+  # Try to unload both common Broadcom modules
+  run_audit "System Setup (unload)" modprobe -r brcmfmac wl || true
+  # Reload the open-source driver (standard for Fedora BCM4331)
+  run_audit "System Setup (reload)" modprobe brcmfmac || true
+  # Disable power management which often causes drops on Broadcom
+  run_audit "System Setup (power_save off)" iw dev "${INTERFACE}" set power_save off || true
+  run_audit "System Setup (NM managed)" nmcli device set "${INTERFACE}" managed yes || true
+
+  # Step 3: Ensure networking is globally enabled in NetworkManager.
   if ! networking_enabled; then
     record_milestone "NETWORKING_GLOBALLY_DISABLED"
     if [[ "$AUTO_REENABLE_NETWORKING" -eq 1 ]]; then
@@ -385,7 +481,7 @@ recover() {
     sleep 2
   fi
 
-  # Step 2: Identify the best connection to attempt activation.
+  # Step 4: Identify the best connection to attempt activation.
   local uuid
   uuid=$(select_best_connection)
 
@@ -395,14 +491,58 @@ recover() {
     uuid=$(nmcli -t -f UUID connection show | head -n1)
   fi
 
-  # Step 3: Attempt to bring the connection up.
+  # Step 5: Perform Forensic Handshake before activation
+  forensic_handshake
+
+  # Step 6: Attempt to bring the connection up with retries.
   if [[ -n "$uuid" ]]; then
-    run_audit "connection activation" nmcli connection up uuid "$uuid"
+    # Check if the connection is already active and healthy.
+    local state
+    state=$(nmcli -g GENERAL.STATE device show uuid "$uuid" 2>/dev/null || echo "unknown")
+    if [[ "$state" == "100 (connected)" ]]; then
+      log "Connection $uuid is already active. Checking health..."
+      local health
+      health=$(calculate_health)
+      if [[ "$health" -eq 100 ]]; then
+        record_milestone "CONNECTION_ALREADY_ACTIVE_AND_HEALTHY" "UUID $uuid"
+        return 0
+      fi
+      log "Connection $uuid is active but health is degraded ($health/100). Re-activating..."
+    fi
+
+    local retries=3
+    local attempt=1
+    local success=0
+    
+    while [[ $attempt -le $retries ]]; do
+      record_milestone "CONNECTION_ACTIVATION_ATTEMPT" "Attempt $attempt of $retries for UUID $uuid"
+      # We use a longer 60s timeout for connection activation specifically for BCM4331.
+      if run_audit_timeout 60s "connection activation" nmcli connection up uuid "$uuid"; then
+        success=1
+        break
+      fi
+      log "WARNING: Connection activation attempt $attempt failed. Retrying in 5s..."
+      sleep 5
+      attempt=$((attempt + 1))
+    done
+    
+    if [[ $success -eq 1 ]]; then
+      record_milestone "CONNECTION_ACTIVATION_SUCCESS" "UUID $uuid"
+    else
+      record_milestone "CONNECTION_ACTIVATION_FAILURE" "All $retries attempts failed for UUID $uuid"
+      # If activation failed, try a soft reset of the interface.
+      run_audit "interface reset (disconnect)" nmcli device disconnect uuid "$uuid" 2>/dev/null || true
+      sleep 2
+      run_audit "interface reset (connect)" nmcli device connect uuid "$uuid" 2>/dev/null || true
+    fi
   else
     record_milestone "CRITICAL_FAILURE_NO_UUID"
   fi
   
-  record_milestone "RECOVERY_SEQUENCE_COMPLETE"
+  # Step 7: Final verification
+  local final_health
+  final_health=$(calculate_health)
+  record_milestone "RECOVERY_SEQUENCE_COMPLETE" "Final Health: $final_health/100"
 }
 
 # -----------------------------------------------------------------------------
@@ -410,6 +550,8 @@ recover() {
 # -----------------------------------------------------------------------------
 main() {
   init_db
+  install_dependencies
+  detect_interface
   record_milestone "CONTROLLER_INITIALIZED"
 
   log "Broadcom Network Controller active. Monitoring health..."
@@ -448,6 +590,8 @@ main() {
 # Support for manual "force" recovery via CLI argument.
 if [[ "${1:-}" == "--force" ]]; then
   init_db
+  install_dependencies
+  detect_interface
   recover
   exit 0
 fi
