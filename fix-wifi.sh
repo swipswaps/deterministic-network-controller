@@ -23,6 +23,7 @@
 # Exit immediately if a command fails, if an unset variable is used, 
 # or if any command in a pipeline fails.
 set -euo pipefail
+trap 'dump_stack "$LINENO"' ERR
 
 # -----------------------------------------------------------------------------
 # SIGNAL HANDLING
@@ -30,6 +31,21 @@ set -euo pipefail
 # Gracefully handle termination signals to ensure the script doesn't leave
 # the system in an inconsistent state or keep the lock file unnecessarily.
 trap 'echo "[EXIT] Shutting down network controller..."; exit 0' INT TERM
+
+# dump_stack: Provides a detailed diagnostic dump when the script fails.
+dump_stack() {
+  local line="$1"
+  {
+    echo "=== FATAL STACK DUMP @ Line ${line} ==="
+    echo "Timestamp: $(date)"
+    echo "Last 50 lines of log:"
+    tail -50 "$LOG_FILE"
+    echo "SQLite command failures:"
+    sqlite3 "$DB_FILE" "SELECT timestamp, command, exit_code, output FROM commands WHERE exit_code != 0 ORDER BY timestamp DESC LIMIT 10;" 2>/dev/null || true
+  } >> "$LOG_FILE"
+  echo "FATAL: Recovery failed at line ${line}. Full details in ${LOG_FILE} and ${DB_FILE}" >&2
+  exit 1
+}
 
 # -----------------------------------------------------------------------------
 # DEPENDENCY PRECHECK
@@ -136,24 +152,43 @@ MIN_OUTPUT=-1000
 
 # install_dependencies: Checks for and attempts to install missing system tools.
 install_dependencies() {
-  local deps=("sqlite3" "nmcli" "ping" "getent" "ip" "timeout" "haveged" "chrony" "iw" "rfkill" "tcpdump" "mtr" "bind-utils")
-  local missing=()
+  record_milestone "DEPENDENCY_CHECK_START"
+  declare -A pkg_to_bin=(
+    [sqlite]=sqlite3
+    [tcpdump]=tcpdump
+    [mtr]=mtr
+    [traceroute]=traceroute
+    [bind-utils]=dig
+    [haveged]=haveged
+    [chrony]=chronyc
+    [iw]=iw
+    [rfkill]=rfkill
+    [NetworkManager]=nmcli
+    [iputils]=ping
+    [iproute]=ip
+  )
   
-  for dep in "${deps[@]}"; do
-    if ! command -v "$dep" &>/dev/null && ! rpm -q "$dep" &>/dev/null; then
-      missing+=("$dep")
+  local missing=()
+  for pkg in "${!pkg_to_bin[@]}"; do
+    local bin="${pkg_to_bin[$pkg]}"
+    if ! command -v "$bin" >/dev/null 2>&1; then
+      missing+=("$pkg")
     fi
   done
   
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Missing dependencies: ${missing[*]}"
+    record_milestone "INSTALLING_DEPENDENCIES" "${missing[*]}"
     if [[ "$EUID" -eq 0 ]] || command -v sudo &>/dev/null; then
       log "Attempting to install missing dependencies via dnf..."
       sudo dnf install -y "${missing[@]}" || log "WARNING: Failed to install some dependencies."
     else
       log "ERROR: Missing dependencies and cannot run sudo dnf. Script may fail."
     fi
+  else
+    record_milestone "DEPENDENCIES_VERIFIED" "All forensic tools present"
   fi
+  record_milestone "DEPENDENCY_CHECK_COMPLETE"
 }
 
 # -----------------------------------------------------------------------------
@@ -230,20 +265,22 @@ run_audit_timeout() {
   local timeout_val="$1"
   local label="$2"
   shift 2
+  log "[EXEC @ Line ${BASH_LINENO[0]}]: $label ($*)"
   log "RUNNING COMMAND: $label ($*) [Timeout: $timeout_val]"
-  local output
+  
+  local tmp_output=$(mktemp)
   local exit_code=0
   
-  # We use the provided timeout to prevent stalled commands from blocking the controller.
-  # We use 'eval' to support complex commands if needed, but carefully.
-  output=$(timeout "$timeout_val" "$@" 2>&1) || exit_code=$?
+  # We use tee to provide continuous display to the log file and terminal 
+  # while also capturing the output into a temporary file for the database.
+  timeout "$timeout_val" "$@" 2>&1 | tee -a "$LOG_FILE" "$tmp_output"
+  exit_code=${PIPESTATUS[0]}
   
-  # Print output to terminal verbatim if it's a failure or if verbose mode (implied by log)
+  local output=$(cat "$tmp_output")
+  rm -f "$tmp_output"
+  
   if [[ $exit_code -ne 0 ]]; then
     log "COMMAND FAILED: $label (Exit Code: $exit_code)"
-    echo "--- FAILURE OUTPUT ---"
-    echo "$output"
-    echo "----------------------"
   fi
   
   record_command "$label $*" "$exit_code" "$output"
@@ -261,10 +298,23 @@ forensic_handshake() {
   run_audit "DNS Forensic (External)" dig @8.8.8.8 +short google.com || true
   
   # Path & Quality
-  run_audit "Path Forensic" ip route || true
+  run_audit "Path Forensic: traceroute" traceroute -q 1 -m 15 google.com || true
+  run_audit "Quality Forensic: mtr" mtr -c 5 -r -w google.com || true
+  run_audit "Path Forensic: ip route" ip route || true
   run_audit "ARP Forensic" ip neighbor show || true
   
+  # System Health
+  run_audit "Entropy Audit" cat /proc/sys/kernel/random/entropy_avail || true
+  local entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
+  if [[ "$entropy" -lt 200 ]]; then
+    run_audit "Entropy Audit: Boosting" sudo systemctl start haveged || true
+  fi
+  run_audit "Time Forensic: sources" chronyc -n sources || true
+  run_audit "Time Forensic: sync" sudo chronyc makestep || true
+  
   # Broadcom-specific forensics
+  run_audit "WPA Audit" journalctl -u wpa_supplicant --no-pager -n 50 || true
+  run_audit "Network Sniff (Brief)" sudo timeout 5s tcpdump -i "${INTERFACE}" -c 10 -n || true
   run_audit "Broadcom Forensic (rfkill)" rfkill list || true
   run_audit "Broadcom Forensic (dmesg)" dmesg | tail -50 | grep -Ei 'broadcom|bcm|wifi|wl|brcm' || true
   run_audit "Broadcom Forensic (NM status)" nmcli device status || true
@@ -552,6 +602,10 @@ recover() {
   local final_health
   final_health=$(calculate_health)
   record_milestone "RECOVERY_SEQUENCE_COMPLETE" "Final Health: $final_health/100"
+  
+  if [[ "$final_health" -eq 100 ]]; then
+    touch "${PROJECT_ROOT}/recovery_complete.flag" 2>/dev/null || true
+  fi
 }
 
 # -----------------------------------------------------------------------------
