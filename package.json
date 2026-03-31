@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "PROJECT_ROOT=$(pwd) tsx server.ts",
-    "setup": "chmod +x setup-system.sh fix-wifi.sh cold-start.sh && PROJECT_ROOT=$(pwd) ./setup-system.sh",
+    "setup": "chmod +x setup-system.sh fix-wifi.sh cold-start.sh sync-updates.sh && PROJECT_ROOT=$(pwd) ./setup-system.sh",
     "cold-start": "PROJECT_ROOT=$(pwd) ./cold-start.sh",
+    "sync-updates": "chmod +x sync-updates.sh && PROJECT_ROOT=$(pwd) ./sync-updates.sh",
     "audit": "sqlite3 recovery_state.db \"SELECT timestamp, name, details FROM milestones ORDER BY timestamp ASC;\"",
     "build": "vite build",
     "preview": "vite preview",
